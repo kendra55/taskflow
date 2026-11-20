@@ -22,7 +22,7 @@ describe('API TaskFlow', () => {
     it('renvoie une liste vide au départ', async () => {
       const response = await request(app).get('/api/tasks');
 
-      expect(response.status).toBe(999);
+      expect(response.status).toBe(200);
       expect(response.body).toEqual([]);
     });
   });
