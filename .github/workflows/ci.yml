@@ -43,5 +43,5 @@ jobs:
       - name: Vérifier Prettier
         run: npm run format:check
 
-      - name: Lancer les tests
-        run: npm test
+      - name: Lancer les tests avec couverture
+        run: npm run test:coverage
