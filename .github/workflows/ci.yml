@@ -1,0 +1,47 @@
+
+name: TaskFlow CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    name: Qualité et tests
+    runs-on: ubuntu-latest
+
+    strategy:
+      matrix:
+        app: [api, front]
+
+    defaults:
+      run:
+        working-directory: ${{ matrix.app }}
+
+    steps:
+      - name: Récupérer le code
+        uses: actions/checkout@v4
+
+      - name: Installer Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: ${{ matrix.app }}/package-lock.json
+
+      - name: Installer les dépendances
+        run: npm ci
+
+      - name: Vérifier ESLint
+        run: npm run lint
+
+      - name: Vérifier Prettier
+        run: npm run format:check
+
+      - name: Lancer les tests
+        run: npm test
