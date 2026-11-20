@@ -24,3 +24,5 @@ backups/
 *.pem
 *.key
 *.crt
+
+.gitlab-ci-local/

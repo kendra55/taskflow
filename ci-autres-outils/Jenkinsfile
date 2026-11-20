@@ -1,0 +1,176 @@
+
+pipeline {
+    agent none
+
+    options {
+        skipDefaultCheckout(true)
+        disableConcurrentBuilds(abortPrevious: true)
+        timeout(time: 15, unit: 'MINUTES')
+        timestamps()
+    }
+
+    stages {
+        stage('API - Node 20 et 22') {
+            matrix {
+                axes {
+                    axis {
+                        name 'NODE_VERSION'
+                        values '20', '22'
+                    }
+                }
+
+                agent {
+                    docker {
+                        image "node:${NODE_VERSION}-alpine"
+                        args '-u root:root'
+                    }
+                }
+
+                environment {
+                    npm_config_cache = '/tmp/.npm'
+                }
+
+                stages {
+                    stage('Checkout API') {
+                        steps {
+                            checkout scm
+                        }
+                    }
+
+                    stage('Qualité et tests API') {
+                        steps {
+                            dir('api') {
+                                sh 'npm ci'
+                                sh 'npm run lint'
+                                sh 'npm run format:check'
+                                sh 'npm run test:coverage'
+                                sh '''
+                                    node -e '
+                                    const fs = require("fs");
+                                    const report = JSON.parse(
+                                      fs.readFileSync("coverage/coverage-summary.json", "utf8")
+                                    );
+                                    const pct = report.total.lines.pct;
+                                    console.log("Couverture API : " + pct + "%");
+                                    if (pct < 75) process.exit(1);
+                                    '
+                                '''
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        stage('Préparer le réseau Docker') {
+    agent any
+
+    steps {
+        sh '''
+            docker network inspect taskflow-ci >/dev/null 2>&1 ||
+            docker network create taskflow-ci
+        '''
+    }
+}
+
+        stage('API - Intégration PostgreSQL') {
+            agent {
+                docker {
+                    image 'node:20-alpine'
+                    args '-u root:root --network taskflow-ci'
+                }
+            }
+
+            environment {
+                npm_config_cache = '/tmp/.npm'
+                POSTGRES_USER = 'taskflow'
+                POSTGRES_PASSWORD = 'taskflow'
+                POSTGRES_DB = 'taskflow'
+            }
+
+            steps {
+                checkout scm
+
+                script {
+                    docker.image('postgres:16-alpine').withRun(
+    '--network taskflow-ci ' +
+    "--name taskflow-pg-${env.BUILD_NUMBER} " +
+    '-e POSTGRES_USER=taskflow ' +
+    '-e POSTGRES_PASSWORD=taskflow ' +
+    '-e POSTGRES_DB=taskflow'
+) { postgres ->
+                        withEnv([
+                            "DATABASE_URL=postgres://taskflow:taskflow@taskflow-pg-${env.BUILD_NUMBER}:5432/taskflow"
+                        ]) {
+                            dir('api') {
+                                sh 'npm ci'
+                                sh '''
+                                    for i in $(seq 1 30); do
+                                        if node -e '
+                                          const net = require("net");
+                                          const u = new URL(process.env.DATABASE_URL);
+                                          const s = net.connect(
+                                            Number(u.port), u.hostname
+                                          );
+                                          s.on("connect", () => {
+                                            s.destroy();
+                                            process.exit(0);
+                                          });
+                                          s.on("error", () => process.exit(1));
+                                        '; then
+                                            break
+                                        fi
+                                                                            if [ "$i" -eq 30 ]; then
+                                            echo "Erreur : PostgreSQL inaccessible après 30 tentatives"
+                                            exit 1
+                                        fi
+                                        sleep 1
+                                    done
+                                '''
+                                sh 'npm run test:int'
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        stage('Frontend') {
+            agent {
+                docker {
+                    image 'node:20-alpine'
+                    args '-u root:root'
+                }
+            }
+
+            environment {
+                npm_config_cache = '/tmp/.npm'
+            }
+
+            steps {
+                checkout scm
+
+                dir('front') {
+                    sh 'npm ci'
+                    sh 'npm run lint'
+                    sh 'npm run format:check'
+                    sh 'npm run test:coverage'
+                    sh 'npm run build'
+                }
+
+                archiveArtifacts artifacts: 'front/dist/**',
+                                 fingerprint: true,
+                                 allowEmptyArchive: false
+            }
+        }
+    }
+
+    post {
+        success {
+            echo 'Pipeline Jenkins réussi !'
+        }
+        failure {
+            echo 'Pipeline Jenkins échoué.'
+        }
+    }
+}
