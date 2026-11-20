@@ -1,0 +1,69 @@
+
+stages:
+  - quality
+  - test
+  - build
+
+default:
+  image: node:20-alpine
+
+api-quality:
+  stage: quality
+  script:
+    - cd api
+    - npm ci
+    - npm run lint
+    - npm run format:check
+
+api-tests:
+  stage: test
+  parallel:
+    matrix:
+      - NODE_VERSION: ["20", "22"]
+  image: node:${NODE_VERSION}-alpine
+  script:
+    - cd api
+    - npm ci
+    - npm run test:coverage
+    - |
+      node --input-type=module -e '
+      import fs from "node:fs";
+      const report = JSON.parse(fs.readFileSync("coverage/coverage-summary.json", "utf8"));
+      const coverage = report.total.lines.pct;
+      console.log(`Couverture des lignes : ${coverage}%`);
+      if (coverage < 75) {
+        console.error("Ã‰chec : couverture infÃ©rieure Ã  75 %");
+        process.exit(1);
+      }
+      '
+
+front:
+  stage: build
+  script:
+    - cd front
+    - npm ci
+    - npm run lint
+    - npm run format:check
+    - npm run test:coverage
+    - npm run build
+  artifacts:
+    paths:
+      - front/dist/
+    expire_in: 7 days
+
+
+api-integration:
+  stage: test
+  image: node:20-alpine
+  services:
+    - name: postgres:16-alpine
+      alias: postgres
+  variables:
+    POSTGRES_USER: taskflow
+    POSTGRES_PASSWORD: taskflow
+    POSTGRES_DB: taskflow
+    DATABASE_URL: postgres://taskflow:taskflow@postgres:5432/taskflow
+  script:
+    - cd api
+    - npm ci
+    - npm run test:int
