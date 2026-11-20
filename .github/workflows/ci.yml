@@ -1,104 +1,196 @@
 
-name: TaskFlow CI
+name: CI
 
 on:
   pull_request:
-    branches: [main]
   push:
     branches: [main]
+    paths-ignore:
+      - "**/*.md"
+      - "docs/**"
 
 permissions:
   contents: read
 
+env:
+  COVERAGE_MIN: "75"
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
-  quality:
-    name: Qualité et tests
+  api:
+    name: api
     runs-on: ubuntu-latest
+    timeout-minutes: 10
 
     strategy:
+      fail-fast: false
       matrix:
-        app: [api, front]
+        node: [20, 22]
 
     defaults:
       run:
-        working-directory: ${{ matrix.app }}
+        working-directory: api
 
     steps:
-      - name: Récupérer le code
+      - name: Recuperer le code
         uses: actions/checkout@v4
 
       - name: Installer Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: ${{ matrix.node }}
           cache: npm
-          cache-dependency-path: ${{ matrix.app }}/package-lock.json
+          cache-dependency-path: api/package-lock.json
 
-      - name: Installer les dépendances
+      - name: Installer les dependances
         run: npm ci
 
-      - name: Vérifier ESLint
+      - name: Verifier ESLint
         run: npm run lint
 
-      - name: Vérifier Prettier
+      - name: Verifier Prettier
         run: npm run format:check
 
       - name: Lancer les tests avec couverture
         run: npm run test:coverage
 
-  integration:
-    name: Tests d'intégration PostgreSQL
+      - name: Verifier le seuil de couverture
+        shell: bash
+        run: |
+          FILE="coverage/coverage-summary.json"
+
+          if [ ! -f "$FILE" ]; then
+            echo "::error::Fichier de couverture introuvable"
+            exit 1
+          fi
+
+          {
+            echo "### Couverture de l'API (Node ${{ matrix.node }})"
+            echo ""
+            echo "| Mesure | Couverture |"
+            echo "|---|---:|"
+
+            for metric in lines statements functions branches; do
+              pct=$(jq -r ".total.$metric.pct" "$FILE")
+              echo "| $metric | $pct % |"
+            done
+
+            echo ""
+            echo "Seuil minimum des lignes : ${COVERAGE_MIN} %"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          LINES=$(jq -r '.total.lines.pct' "$FILE")
+
+          if awk -v pct="$LINES" -v min="$COVERAGE_MIN" \
+            'BEGIN { exit !(pct < min) }'; then
+            echo "::error title=Couverture insuffisante::Lignes ${LINES}% inferieures au seuil ${COVERAGE_MIN}%"
+            exit 1
+          fi
+
+          echo "Couverture suffisante : ${LINES}%"
+
+  api-integration:
+    name: api-integration
     runs-on: ubuntu-latest
+    timeout-minutes: 10
 
     services:
       postgres:
-        image: postgres:16
+        image: postgres:16-alpine
         env:
           POSTGRES_USER: taskflow
           POSTGRES_PASSWORD: taskflow
-          POSTGRES_DB: taskflow_test
+          POSTGRES_DB: taskflow
         ports:
           - 5432:5432
         options: >-
-          --health-cmd "pg_isready -U taskflow -d taskflow_test"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
+          --health-cmd "pg_isready -U taskflow -d taskflow"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
 
     defaults:
       run:
         working-directory: api
 
     env:
-      DATABASE_URL: postgres://taskflow:taskflow@localhost:5432/taskflow_test
+      DATABASE_URL: postgres://taskflow:taskflow@localhost:5432/taskflow
 
     steps:
-      - name: Récupérer le code
+      - name: Recuperer le code
         uses: actions/checkout@v4
 
       - name: Installer Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: "20"
           cache: npm
           cache-dependency-path: api/package-lock.json
 
-      - name: Installer les dépendances
+      - name: Installer les dependances
         run: npm ci
 
-      - name: Exécuter les tests d'intégration
+      - name: Lancer les tests d'integration
         run: npm run test:int
+
+  front:
+    name: front
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    defaults:
+      run:
+        working-directory: front
+
+    steps:
+      - name: Recuperer le code
+        uses: actions/checkout@v4
+
+      - name: Installer Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: front/package-lock.json
+
+      - name: Installer les dependances
+        run: npm ci
+
+      - name: Verifier ESLint
+        run: npm run lint
+
+      - name: Verifier Prettier
+        run: npm run format:check
+
+      - name: Lancer les tests
+        run: npm run test:coverage
+
+      - name: Construire le frontend
+        run: npm run build
+
+      - name: Sauvegarder le build frontend
+        uses: actions/upload-artifact@v4
+        with:
+          name: front-dist
+          path: front/dist/
+          retention-days: 7
+          if-no-files-found: error
 
   docker-build:
     name: Construction Docker (${{ matrix.app }})
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: [api, api-integration, front]
 
     strategy:
       matrix:
         app: [api, front]
 
     steps:
-      - name: Récupérer le code
+      - name: Recuperer le code
         uses: actions/checkout@v4
 
       - name: Configurer Docker Buildx
